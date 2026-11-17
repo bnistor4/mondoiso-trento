@@ -26,7 +26,7 @@ const world = await loadWorld();
 const preload = world.files ? [world.files["tiles-map"], world.files.borders].filter(Boolean) : ["tiles.json", "borders.json"];
 const pv = world.previews?.[city];
 const title = home ? "Mondo Isometrico" : `${c.title} · Mondo Isometrico`;
-const description = home ? "Una mappa isometrica di Roma da open data." : `${c.title}: una mappa isometrica da open data.`;
+const description = home ? "Una mappa isometrica di Trento da open data." : `${c.title}: una mappa isometrica da open data.`;
 // crawlers need absolute URLs: site comes from SITE_DOMAIN (astro.config.mjs)
 const site = Astro.site ?? Astro.url;
 const pageUrl = new URL(Astro.url.pathname.replace(/(.)\/$/, "$1"), site).href, ogImage = new URL(`/og/${home ? "index" : city}.jpg`, site).href;
@@ -57,7 +57,7 @@ const pageUrl = new URL(Astro.url.pathname.replace(/(.)\/$/, "$1"), site).href, 
 		<meta property="og:image" content={ogImage} />
 		<meta property="og:image:width" content="1200" />
 		<meta property="og:image:height" content="630" />
-		<meta property="og:image:alt" content={home ? "Mondo Isometrico, una mappa isometrica di Roma da open data" : `${c.title}, mappa isometrica`} />
+		<meta property="og:image:alt" content={home ? "Mondo Isometrico, una mappa isometrica di Trento da open data" : `${c.title}, mappa isometrica`} />
 		<meta name="twitter:card" content="summary_large_image" />
 		<meta name="twitter:title" content={title} />
 		<meta name="twitter:description" content={description} />

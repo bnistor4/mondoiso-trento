@@ -376,7 +376,7 @@ document.getElementById("credits")!.innerHTML = [
     ? [`<span title="Building heights: LiDAR DSM/DTM, Provincia autonoma di Trento (CC BY 4.0)">LiDAR © <a href="https://siatservices.provincia.tn.it/geonetwork/srv/api/records/p_TN:79c6cdf0-c73a-46ba-870c-704bf4e27ac3">Provincia autonoma di Trento</a> (CC BY 4.0)</span>`]
     : []),
   `Painted with AI`,
-  `<a href="https://github.com/dg996/mondoisometrico">Source</a>`,
-  `Made by <a href="https://domenicogagliardi.com">Domenico Gagliardi</a>`,
+  `<a href="https://github.com/bnistor4/mondoiso-trento">Source</a>`,
+  `Made by <a href="https://bnistor.dev">Bogdan Nistor</a>, based on <a href="https://github.com/dg996/mondoisometrico">Mondo Isometrico</a>`,
 // each credit stays on one line; the separator rides at the end of the previous one so no line starts with "·"
 ].map((c, i, all) => `<span class="credit">${c}${i < all.length - 1 ? " ·" : ""}</span>`).join(" ");
