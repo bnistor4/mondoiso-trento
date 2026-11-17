@@ -3,7 +3,7 @@ import { createReadStream, existsSync, statSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'astro/config';
 import { HOSTING } from '../pipeline/src/hosting.ts';
-import { CITIES } from '../pipeline/src/places.ts';
+import { CITIES, SITE_CITIES } from '../pipeline/src/places.ts';
 
 // hosting settings (TILES_ORIGIN, SITE_DOMAIN) live in the repo-root .env, never in git
 const ENV = fileURLToPath(new URL('../.env', import.meta.url));
@@ -54,7 +54,7 @@ const cityRedirects = () => ({
 	hooks: {
 		'astro:build:done': ({ dir }) => {
 			const lines = [];
-			for (const [slug, city] of Object.entries(CITIES)) {
+			for (const slug of SITE_CITIES) { const city = CITIES[slug];
 				const titleCase = slug.replace(/(^|-)([a-z])/g, (_, s, c) => s + c.toUpperCase());
 				const fromTitle = city.title.trim().replace(/\s+/g, '-');
 				for (const from of new Set([titleCase, fromTitle, slug.toUpperCase()])) {

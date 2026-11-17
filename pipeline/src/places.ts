@@ -115,4 +115,7 @@ export const CITIES: Record<string, City> = {
   trento: { title: "Trento", region: "trento", center: [46.0676, 11.1215], widthM: 6000 }, // v4: citta + nord + sud (~3.6 x 7.3 km)
 };
 
-export const DEFAULT_CITY = "roma";
+export const DEFAULT_CITY = "trento";
+
+/** Cities this site builds pages for: only regions whose tiles are published here. */
+export const SITE_CITIES = ["trento"];
