@@ -1,0 +1,1 @@
+export AREA=trento-calisio CTX=trento-citta,trento-nord,trento-sud,trento-est,trento-spini,trento-povo,trento-martignano,trento-gardolo,trento-ovest,trento-cortesano,trento-villamontagna ORDER=paint-test/order-v8-calisio.txt LOG=paint-test/scores-v8-calisio.tsv LOF=paint-test/lo-v8-calisio.txt TPL=scratch/t3u-est.txt

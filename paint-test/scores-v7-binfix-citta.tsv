@@ -1,0 +1,4 @@
+attempt	window	inputs	prompt	match	result
+01	-2_-5	input	T3u (strips: left+top+bottom)	0.587	pass
+02	-1_-5	input	T3u (strips: none)	0.665	rejected
+03	-1_-5	input	T3u (strips: left+right+top+bottom)	0.794	pass

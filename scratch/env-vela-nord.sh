@@ -1,0 +1,1 @@
+export AREA=trento-vela-nord CTX=trento-citta,trento-nord,trento-sud,trento-est,trento-spini,trento-povo,trento-martignano,trento-gardolo,trento-ovest,trento-cortesano,trento-villamontagna,trento-calisio,trento-vela-sud ORDER=paint-test/order-v8-vela-nord.txt LOG=paint-test/scores-v8-vela-nord.tsv LOF=paint-test/lo-v8-vela-nord.txt TPL=scratch/t3u-est.txt

@@ -1,0 +1,76 @@
+// usage (from pipeline/): npx tsx ../scratch/rawcheck.mts <area> ... [--limit=0.05] [--windows]
+// Close-out gate: for every art tile the export would use (areas in the given order, last wins, as export.ts),
+// measure on a 8 px lattice inside the visible union (fade alpha > 0.5, render not black) the share of points where the
+// art is raw render (15x15 patch exactly flat in art and render: copied render, palette-shifted or not) and the share
+// where the art is a flat black patch but the render has content. Exit 1 if any tile exceeds --limit on either. --windows: also blame covering windows.
+import sharp from "sharp";
+import { existsSync, readdirSync } from "node:fs";
+import { join } from "node:path";
+import { AREAS, areaPolygon, unionEdges, unionInsideDistance, openArea } from "../pipeline/src/areas.ts";
+import { REGIONS } from "../pipeline/src/places.ts";
+const args = process.argv.slice(2), areas = args.filter((a) => !a.startsWith("--"));
+const limit = Number(args.find((a) => a.startsWith("--limit="))?.split("=")[1] ?? 0.05), blame = args.includes("--windows");
+const FLAT = Number(process.env.FLAT ?? 6);
+const D = "/workspace/mondoiso-trento/data/derived", T = 1024, S = 896, STEP = 8;
+const region = openArea(areas[0]).region;
+const outlines = areas.map((a) => areaPolygon(AREAS[a].bbox)), edges = unionEdges(outlines);
+const [E0, E1] = REGIONS[region].edgeFadePx ?? [760, 2560], EMID = (E0 + E1) / 2;
+const art = new Map<string, string>(), rend = new Map<string, string>(), rendAll = new Map<string, string[]>();
+const BLIM = Number(process.env.BLIM ?? 0.03); // v8: art pure black where ANY area's render has content (speckled, not only flat)
+for (const a of areas) for (const [layer, m] of [["paint", art], ["render", rend]] as const) {
+  const dir = join(D, a, layer); if (!existsSync(dir)) continue;
+  for (const f of readdirSync(dir)) if (/^-?\d+_-?\d+\.png$/.test(f)) { m.set(f.slice(0, -4), join(dir, f)); if (layer === "render") rendAll.set(f.slice(0, -4), [...(rendAll.get(f.slice(0, -4)) ?? []), join(dir, f)]); }
+}
+const raw = async (f: string) => (await sharp(f).removeAlpha().resize(T, T).raw().toBuffer());
+const W7 = 7; // half window: 15x15 (7x7 still caught smooth painted water/yards as speckle)
+/** per pixel: summed over RGB of (max - min) in a 15x15 window (separable sliding min/max, brute force per row is fine at 1024 px) */
+function range7(B: Buffer) {
+  const out = new Uint16Array(T * T), mx = new Uint8Array(T * T), mn = new Uint8Array(T * T), mx2 = new Uint8Array(T * T), mn2 = new Uint8Array(T * T);
+  for (let c = 0; c < 3; c++) {
+    for (let y = 0; y < T; y++) for (let x = 0; x < T; x++) { let a = 0, b = 255; for (let d = -W7; d <= W7; d++) { const xx = Math.min(T - 1, Math.max(0, x + d)), v = B[(y * T + xx) * 3 + c]; if (v > a) a = v; if (v < b) b = v; } mx[y * T + x] = a; mn[y * T + x] = b; }
+    for (let y = 0; y < T; y++) for (let x = 0; x < T; x++) { let a = 0, b = 255; for (let d = -W7; d <= W7; d++) { const yy = Math.min(T - 1, Math.max(0, y + d)), i = yy * T + x; if (mx[i] > a) a = mx[i]; if (mn[i] < b) b = mn[i]; } mx2[y * T + x] = a; mn2[y * T + x] = b; }
+    for (let i = 0; i < T * T; i++) out[i] += mx2[i] - mn2[i];
+  }
+  return out;
+}
+let fails = 0; const rows: string[] = [], warn: string[] = [];
+for (const [k, f] of [...art].sort()) {
+  const r = rend.get(k); if (!r) continue;
+  const [tx, ty] = k.split("_").map(Number);
+  const pts: number[] = [];
+  for (let y = STEP / 2; y < T; y += STEP) for (let x = STEP / 2; x < T; x += STEP)
+    if (unionInsideDistance([tx * T + x, ty * T + y], outlines, edges) > EMID) pts.push(y * T + x);
+  if (pts.length < 64) continue;
+  const A = await raw(f), R = await raw(r);
+  const vis = pts.filter((p) => R[p * 3] + R[p * 3 + 1] + R[p * 3 + 2] > 45);
+  if (!vis.length) continue;
+  const RU = Buffer.alloc(T * T); for (const rf of rendAll.get(k) ?? [r]) { const X = await raw(rf); for (let q = 0; q < T * T; q++) if (X[q * 3] + X[q * 3 + 1] + X[q * 3 + 2] > 30) RU[q] = 1; }
+  let bk = 0, inU = 0; for (const p of pts) if (RU[p]) { inU++; if (A[p * 3] + A[p * 3 + 1] + A[p * 3 + 2] < 30) bk++; }
+  const rA = range7(A), rR = range7(R);
+  let same = 0, dark = 0; const hit: number[] = [];
+  for (const p of vis) {
+    // raw render: a 15x15 patch that is exactly flat in the art AND in the render (painted art is never flat; palette offsets keep flatness)
+    if (rA[p] <= FLAT && rR[p] <= FLAT) { same++; hit.push(p); }
+    // black where the render has content, and black in the whole 15x15 (a band or patch, not a dark pixel)
+    else if (A[p * 3] + A[p * 3 + 1] + A[p * 3 + 2] < 30 && rA[p] <= FLAT && R[p * 3] + R[p * 3 + 1] + R[p * 3 + 2] > 90) { dark++; hit.push(p); }
+  }
+  const s = same / vis.length, dk = dark / vis.length, bb = inU ? bk / inU : 0, bad = s > limit || dk > limit || bb > BLIM;
+  if (!bad && (s > 0.02 || dk > 0.02 || bb > 0.01)) warn.push(`${k} raw ${(s * 100).toFixed(1)}% dark ${(dk * 100).toFixed(1)}% black ${(bb * 100).toFixed(1)}%`);
+  if (bad) {
+    fails++;
+    let w = "";
+    if (blame) { // which windows cover the offending points (global px), with point counts
+      const cnt = new Map<string, number>();
+      for (const p of hit) { const gx = tx * T + (p % T), gy = ty * T + Math.floor(p / T);
+        for (let i = Math.floor((gx - T) / S) + 1; i * S <= gx; i++) for (let j = Math.floor((gy - T) / S) + 1; j * S <= gy; j++) {
+          const n = `${i}_${j}`; const own = areas.concat(Object.keys(AREAS).filter((a) => a.startsWith("trento-"))).find((a) => existsSync(join(D, a, "windows", n + ".png")));
+          const kk = `${n}@${own ?? "none"}`; cnt.set(kk, (cnt.get(kk) ?? 0) + 1); } }
+      w = " <- " + [...cnt].sort((a, b) => b[1] - a[1]).slice(0, 4).map(([n, c]) => `${n}:${c}`).join(" ");
+    }
+    rows.push(`${f.split("/").slice(-3)[0]} ${k} raw ${(s * 100).toFixed(1)}% dark ${(dk * 100).toFixed(1)}% black ${(bb * 100).toFixed(1)}% (${vis.length} pts)${w}`);
+  }
+}
+rows.forEach((r) => console.log(r));
+if (warn.length) console.log(`warn (2%..limit): ${warn.join("; ")}`);
+console.log(`rawcheck ${areas.length} areas, ${art.size} art tiles, limit ${limit * 100}% (black-on-render ${BLIM * 100}%): ${fails} failing`);
+process.exit(fails ? 1 : 0);

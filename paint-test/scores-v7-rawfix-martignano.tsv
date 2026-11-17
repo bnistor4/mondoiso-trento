@@ -1,0 +1,9 @@
+attempt	window	inputs	prompt	match	result
+01	-1_-7	input	T3u (strips: left+right+top)	0.71	pass
+02	-2_-6	input	T3u (strips: top+bottom)	0.607	pass
+03	-4_-6	input	T3u (strips: top+bottom)	0.669	pass
+04	-6_-6	input	T3u (strips: left+top+bottom)	0.776	pass
+05	-7_-7	input	T3u (strips: left+right+top+bottom)	0.662	pass
+06	2_-9	input	T3u (strips: left+right+top+bottom)	0.744	pass
+07	-3_-6	input	T3u (strips: left+right+top+bottom)	0.673	pass
+08	-5_-6	input	T3u (strips: left+right+top+bottom)	0.685	pass

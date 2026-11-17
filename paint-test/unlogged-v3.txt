@@ -1,0 +1,3 @@
+-10_-10 unlogged first gen (flat meadow, discarded)
+-11_-11 unlogged gen 1 (hallucinated city, discarded)
+-12_-11 unlogged gen 1 (hallucinated village, discarded)

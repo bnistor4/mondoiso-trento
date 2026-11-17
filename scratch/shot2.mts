@@ -1,0 +1,15 @@
+import { chromium } from "playwright-core";
+const b = await chromium.launch({ executablePath: "/usr/bin/google-chrome", args: ["--enable-unsafe-swiftshader", "--ignore-gpu-blocklist"] });
+const p = await b.newPage({ viewport: { width: Number(process.env.VW ?? 1440), height: Number(process.env.VH ?? 900) } });
+const errs: string[] = [], failed: string[] = [];
+p.on("pageerror", (e) => errs.push("pageerror: " + e.message));
+p.on("console", (m) => { if (m.type() === "error") errs.push("console: " + m.text()); });
+p.on("requestfailed", (r) => failed.push(r.url()));
+p.on("response", (r) => { if (r.status() >= 400) failed.push(r.status() + " " + r.url()); });
+await p.goto("http://127.0.0.1:4391/trento" + (process.env.Q ?? ""), { waitUntil: "networkidle", timeout: 60000 });
+await p.waitForTimeout(Number(process.env.WAIT ?? 6000));
+await p.screenshot({ path: "/workspace/mondoiso-trento/shots/" + (process.env.OUT0 ?? "render-maplayer-fog.png") + "" });
+await p.mouse.click(Math.round(Number(process.env.VW ?? 1440) / 2), 300); await p.keyboard.press("p"); await p.waitForTimeout(Number(process.env.WAIT ?? 6000));
+await p.screenshot({ path: "/workspace/mondoiso-trento/shots/" + (process.env.OUT ?? "render.png") + "" });
+console.log(JSON.stringify({ errs, failed: failed.slice(0, 20), nFailed: failed.length }, null, 1));
+await b.close();

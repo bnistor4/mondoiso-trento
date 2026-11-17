@@ -1,0 +1,1 @@
+export AREA=trento-gardolo CTX=trento-citta,trento-nord,trento-sud,trento-est,trento-spini,trento-povo,trento-martignano,trento-ovest ORDER=paint-test/order-v7-rawfix-gardolo.txt LOG=paint-test/scores-v7-rawfix-gardolo.tsv LOF=paint-test/lo-v7-rawfix-gardolo.txt TPL=scratch/t3u-est.txt

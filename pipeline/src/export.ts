@@ -1,0 +1,691 @@
+/**
+ * Export rendered/painted areas to the web viewer.
+ *
+ *   npm run export -- tlv-core [more areas…] [--data-only]
+ *
+ * All areas must belong to one region. Only files that differ from what is published (R2) are
+ * written, into the local cache data/web/regions/<region>/ (served by `npm run dev` over production;
+ * `npm run publish -- <region>` uploads and empties it):
+ *   tiles/map/{z}/{x}/{y}.avif         painted tiles where available; unpainted render is fogged
+ *   tiles/photo/{z}/{x}/{y}.avif       3D render only (toggle)
+ *   data/world.json                    camera, bounds, tile origin, ENU→pixel map, attributions, and
+ *                                      the names of the files below (the only mutable file)
+ *   data/tiles-<layer>.<hash>.json     every tile of a layer per zoom with its content hash (URL ?v=)
+ *   data/borders.<hash>.json           OSM city borders in art-pixel space, on real terrain
+ *   data/roads.<hash>.json             drivable roads for traffic (columnar, delta-coded: encodeRoads)
+ *   preview/<city>-<land|port>.<hash>.avif  the city's opening view, shown until the tiles are in
+ * Content-hashed names never change, so browsers keep them for a year; world.json says which are current.
+ * The legacy data/tiles.json + .webp tiles stay on R2 untouched: the viewer's fallback without AVIF.
+ * What is published (tile sources + hashes) is tracked in data/web-state/<region>.json; an export not
+ * yet published keeps its state next to the cache (data/web/<region>.state.json) so exports stack.
+ *
+ * Tile (x, y) at zoom z covers global art pixels [x·512·2^(8-z), …); z = 8 is 1:1.
+ */
+import { isOneway, roadLanes, roadWidth } from "./roadspec.ts";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import sharp from "sharp";
+import { AREAS, groundH, areaPolygon, unionEdges, unionInsideDistance, openArea } from "./areas.ts";
+import { CAMERA, activeRegion, axes, camera, ecefToEnu, enuToPixel, llhToEcef, llhToPixel, enuHeight } from "./camera.ts";
+import { HOSTING } from "./hosting.ts";
+import { DERIVED, RAW, WEB_CACHE, WEB_STATE, readJson } from "./paths.ts";
+import { CITIES, REGIONS } from "./places.ts";
+import { groundAt, inWater, hideBelowBanks, roadSurfaceSafe, type TerrainMeta, type Point } from "./road-safety.ts";
+import { readHeights } from "./heights.ts";
+import { artCoverage, renderedCoverage, paintedBounds, parseArtBounds } from "./art-coverage.ts";
+import { bridgeProfile, deckHeight } from "./bridge-profile.ts";
+import { LANDMARKS } from "./landmarks.ts";
+import { landmarkProjector } from "./landmark-anchors.ts";
+import { contextTile, CONTEXT_BACKGROUND, CONTEXT_VERSION } from "./context-tiles.ts";
+import { parseArgs } from "node:util";
+
+const TS = 512;                  // web tile size
+const SPLIT = CAMERA.tile / TS;  // web tiles per art tile edge
+const NATIVE_Z = 8;
+const MIN_Z = 2;
+/** AVIF q50 ≈ the old WebP q72 in PSNR at ~40% fewer bytes (measured on painted tiles). */
+const FORMAT = "avif", QUALITY = 50;
+const MARGIN = 16; // neighbour pixels used when building each zoomed-out tile
+/** Soft map edge: tiles fade out toward the areas' true outline instead of ending in tile steps.
+ *  Fully transparent within EDGE0 of the outline (half a render tile's diagonal: the staircase
+ *  never shows), fully opaque from EDGE1 in. */
+let EDGE0 = 760, EDGE1 = EDGE0 + 1800; // per-region override: Region.edgeFadePx
+let outlines: Array<Array<[number, number]>> = [];
+let outlineEdges: Array<[[number, number], [number, number]]> = [];
+let outlineKey = "";
+/** web/src/pages/index.astro #map background (#0e0f12): the edge fades into it */
+const BG = CONTEXT_BACKGROUND;
+/** distance to the OUTER border of all exported areas together (adjoining areas do not fade at their shared edge) */
+const edgeDistance = (x: number, y: number) => unionInsideDistance([x, y], outlines, outlineEdges);
+
+/** Render-black inside the union = outside the modelled terrain. The fade outline is the bbox projected at groundH, so
+ *  where the real terrain at the bbox edge is far higher (Trento west/south slopes, up to ~650 m above groundH) the rendered
+ *  ground ends up to ~1250 px inside the outline and the gap stayed black on the map (v7 wedges). Fade those pixels out too:
+ *  content mask (render sum > 30) blurred, alpha 0 at and beyond the content edge, full ~2 sigma inside. null = no black. */
+const contentAlphaCache = new Map<string, Promise<Buffer | null>>();
+/** every exported area's render of a tile key (areas render black outside their own bbox: the mask is their union) */
+const renderAll = new Map<Key, string[]>();
+function contentAlpha(renderFiles: string[]): Promise<Buffer | null> {
+  const ck = renderFiles.join("|");
+  let p = contentAlphaCache.get(ck);
+  if (!p) {
+    p = (async () => {
+      let m: Buffer | null = null, info = { width: 0, height: 0 };
+      for (const f of renderFiles) {
+        const r = await sharp(f).removeAlpha().raw().toBuffer({ resolveWithObject: true }); info = r.info;
+        m ??= Buffer.alloc(info.width * info.height);
+        for (let q = 0; q < m.length; q++) if (r.data[q * 3] + r.data[q * 3 + 1] + r.data[q * 3 + 2] > 30) m[q] = 255;
+      }
+      if (!m) return null;
+      const n = m.length; let black = 0; for (let q = 0; q < n; q++) if (!m[q]) black++;
+      if (black < 64) return null;
+      const b = await sharp(m, { raw: { width: info.width, height: info.height, channels: 1 } }).blur(24).raw().toBuffer();
+      for (let q = 0; q < n; q++) { const t = Math.min(1, Math.max(0, (b[q] / 255 - 0.5) / 0.5)); b[q] = m[q] ? Math.round(t * t * (3 - 2 * t) * 255) : 0; }
+      return b;
+    })();
+    contentAlphaCache.set(ck, p);
+    while (contentAlphaCache.size > 16) contentAlphaCache.delete(contentAlphaCache.keys().next().value!);
+  }
+  return p;
+}
+
+/** Exact painted keys also drive the client activity mask. */
+let paintedArt = new Set<string>();
+
+/** Native web tile at global art px (x0, y0): fade alpha near the map edge (null = fully inside). */
+function edgeAlpha(x0: number, y0: number): Buffer | null {
+  const corners = [[x0, y0], [x0 + TS, y0], [x0, y0 + TS], [x0 + TS, y0 + TS]];
+  if (Math.min(...corners.map(([x, y]) => edgeDistance(x, y))) >= EDGE1) return null;
+  const a = Buffer.alloc(TS * TS), step = 8; // distance on an 8 px lattice, bilinear in between
+  const n = TS / step + 1, grid = new Float32Array(n * n);
+  for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) grid[j * n + i] = edgeDistance(x0 + i * step, y0 + j * step);
+  for (let y = 0; y < TS; y++) for (let x = 0; x < TS; x++) {
+    const gx = x / step, gy = y / step, i = Math.floor(gx), j = Math.floor(gy), fx = gx - i, fy = gy - j;
+    const d = (grid[j * n + i] * (1 - fx) + grid[j * n + i + 1] * fx) * (1 - fy) + (grid[(j + 1) * n + i] * (1 - fx) + grid[(j + 1) * n + i + 1] * fx) * fy;
+    const t = Math.min(1, Math.max(0, (d - EDGE0) / (EDGE1 - EDGE0)));
+    a[y * TS + x] = Math.round(t * t * (3 - 2 * t) * 255);
+  }
+  return a;
+}
+
+type Key = `${number}_${number}`;
+const key = (x: number, y: number): Key => `${x}_${y}`;
+const parse = (k: string) => k.split("_").map(Number) as [number, number];
+/** Existing tiles per zoom with their content hash, written to tiles.json: the viewer never requests
+ *  missing tiles, and ?v=<hash> makes every tile URL immutable (cached at the edge for a year). */
+const index: Record<string, Record<number, Record<string, string>>> = {};
+
+/** Published state of a region: per layer the source stamp of each native tile and the content hash
+ *  of every tile ("z/x_y"), plus the hash of each data file. */
+interface State { layers: Record<string, { sources: Record<string, string>; hashes: Record<string, string> }>; data: Record<string, string> }
+let state: State = { layers: {}, data: {} };
+const hash = (b: Buffer | string) => createHash("sha1").update(b).digest("hex").slice(0, 10);
+const pendingFile = () => join(WEB_CACHE, `${activeRegion()}.state.json`);
+const publishedFile = () => join(WEB_STATE, `${activeRegion()}.json`);
+
+/** A content-addressed data file data/<name>.<hash>.json, written to the cache only when it differs
+ *  from the published one (the old one stays on R2 for pages still pointing at it). */
+function writeData(name: string, content: string) {
+  const h = hash(content);
+  if (state.data[name] === h) return;
+  mkdirSync(join(OUT, "data"), { recursive: true });
+  writeFileSync(join(OUT, "data", `${name}.${h}.json`), content);
+  state.data[name] = h;
+}
+const dataFile = (name: string) => (state.data[name] ? `${name}.${state.data[name]}.json` : undefined);
+
+/** A tile built earlier: from the cache if it is waiting to be published, else from production. */
+const fetched = new Map<string, Buffer>();
+async function readTile(layer: string, z: number, x: number, y: number): Promise<Buffer> {
+  const rel = `tiles/${layer}/${z}/${x}/${y}.${FORMAT}`, local = join(OUT, rel);
+  if (existsSync(local)) return readFileSync(local);
+  if (fetched.has(rel)) return fetched.get(rel)!;
+  const v = state.layers[layer]?.hashes[`${z}/${x}_${y}`];
+  const r = await fetch(`${HOSTING.origin}/regions/${activeRegion()}/${rel}${v ? `?v=${v}` : ""}`);
+  if (!r.ok) throw new Error(`${rel}: not in the cache and ${r.status} from ${HOSTING.origin} (delete ${publishedFile()} to rebuild everything)`);
+  const b = Buffer.from(await r.arrayBuffer());
+  fetched.set(rel, b);
+  return b;
+}
+
+// Bridges are actual geometry in the source render / height pass. Never cover an AI bridge
+// with a second SVG roadway: that produced displaced double decks and broken abutments.
+/** Run tile jobs a few at a time (AVIF encoding is the slow part; sharp works off the main thread). */
+const PARALLEL = 8;
+async function pool(jobs: Array<() => Promise<void>>) {
+  let next = 0;
+  await Promise.all(Array.from({ length: PARALLEL }, async () => { while (next < jobs.length) await jobs[next++](); }));
+}
+
+async function exportLayer(layer: string, sources: Map<Key, string>) {
+  index[layer] = {};
+  const root = join(OUT, "tiles", layer);
+  // which source (path + mtime) produced each native tile last time, and every tile's content hash
+  const st = (state.layers[layer] ??= { sources: {}, hashes: {} });
+  const prevSources = st.sources, nextSources: Record<string, string> = {}, hashes: Record<string, string> = {};
+  const save = async (img: ReturnType<typeof sharp>, z: number, x: number, y: number) => {
+    const buf = await img.avif({ quality: QUALITY, effort: 4 }).toBuffer();
+    mkdirSync(join(root, `${z}`, `${x}`), { recursive: true });
+    writeFileSync(join(root, `${z}`, `${x}`, `${y}.${FORMAT}`), buf);
+    hashes[`${z}/${x}_${y}`] = hash(buf);
+  };
+  // native zoom: split each 1024 art tile into 512 web tiles (only when the source changed)
+  let level = new Map<Key, number>(); // key -> source mtime
+  let changed = new Set<Key>();
+  const jobs: Array<() => Promise<void>> = [];
+  const context = new Map<string, { image: Promise<Buffer>; remaining: number }>();
+  for (const [k, file] of sources) {
+    const [tx, ty] = parse(k);
+    const painted = layer === "map" && file.includes("/paint/");
+    const m = statSync(file).mtimeMs;
+    // Neighbour changes invalidate blurred gutters as well as the tile itself.
+    const neighbours = layer === "map" && !painted ? [-1,0,1].flatMap(dy=>[-1,0,1].map(dx=>{
+      const f=sources.get(key(tx+dx,ty+dy)); return f ? `${f}@${statSync(f).mtimeMs}` : "";
+    })).join("|") : "";
+    const stamp = `${file}@${m}@${CONTEXT_VERSION}@${neighbours}@no-svg-decks@edge${EDGE0}-${EDGE1}-${outlineKey}@rbfade1@${FORMAT}${QUALITY}`;
+    for (let j = 0; j < SPLIT; j++)
+      for (let i = 0; i < SPLIT; i++) {
+        const x = tx * SPLIT + i, y = ty * SPLIT + j, h = st.hashes[`${NATIVE_Z}/${x}_${y}`];
+        level.set(key(x, y), m);
+        nextSources[key(x, y)] = stamp;
+        if (h && prevSources[key(x, y)] === stamp) { hashes[`${NATIVE_Z}/${x}_${y}`] = h; continue; }
+        changed.add(key(x, y));
+        jobs.push(async () => {
+          let source: string | Buffer = file;
+          if (layer === "map" && !painted) {
+            if (!context.has(k)) context.set(k, {image:contextTile(sources,tx,ty),remaining:SPLIT*SPLIT});
+            const item=context.get(k)!;
+            while(context.size>8) context.delete(context.keys().next().value!);
+            source = await item.image;
+            if(--item.remaining===0) context.delete(k);
+          }
+          const rgb = await sharp(source).extract({ left: i * TS, top: j * TS, width: TS, height: TS }).removeAlpha().raw().toBuffer();
+          let alpha = edgeAlpha(x * TS, y * TS);
+          const rfs = painted || layer === "photo" ? renderAll.get(k) ?? [] : [];
+          const ca = rfs.length ? await contentAlpha(rfs) : null;
+          if (ca) {
+            const W = TS * SPLIT; if (!alpha) alpha = Buffer.alloc(TS * TS, 255);
+            for (let yy = 0; yy < TS; yy++) for (let xx = 0; xx < TS; xx++) { const p = yy * TS + xx; alpha[p] = Math.min(alpha[p], ca[(j * TS + yy) * W + i * TS + xx]); }
+          }
+          // fade baked toward the page background: opaque tiles, so no seams where tiles meet
+          if (alpha) for (let p = 0; p < TS * TS; p++) for (let c = 0; c < 3; c++)
+            rgb[p * 3 + c] = Math.round(BG[c] + (rgb[p * 3 + c] - BG[c]) * (alpha[p] / 255));
+          await save(sharp(rgb, { raw: { width: TS, height: TS, channels: 3 } }), NATIVE_Z, x, y);
+        });
+      }
+  }
+  await pool(jobs);
+  console.log(`  ${layer} z${NATIVE_Z}: ${level.size} (${changed.size} updated)`);
+  const keep = (z: number) => Object.fromEntries([...level.keys()].map((k) => [k, hashes[`${z}/${k}`]]));
+  index[layer][NATIVE_Z] = keep(NATIVE_Z);
+  for (let z = NATIVE_Z - 1; z >= MIN_Z; z--) {
+    const parents = new Map<Key, Array<[number, number]>>();
+    for (const k of level.keys()) {
+      const [x, y] = parse(k);
+      const p = key(Math.floor(x / 2), Math.floor(y / 2));
+      if (!parents.has(p)) parents.set(p, []);
+      parents.get(p)!.push([x, y]);
+    }
+    const next = new Map<Key, number>(), nextChanged = new Set<Key>();
+    jobs.length = 0;
+    for (const [p, kids] of parents) {
+      const [px, py] = parse(p);
+      const h = st.hashes[`${z}/${p}`];
+      next.set(p, Math.max(...kids.map(([x, y]) => level.get(key(x, y))!)));
+      if (h && !kids.some(([x, y]) => changed.has(key(x, y)))) { hashes[`${z}/${p}`] = h; continue; }
+      nextChanged.add(p);
+      jobs.push(async () => {
+        // the 2×2 children plus a MARGIN strip of their neighbours, so the downscale filter sees
+        // across tile edges (otherwise faint lines appear along tile borders at low zoom)
+        const composite = [];
+        for (let y = py * 2 - 1; y <= py * 2 + 2; y++) for (let x = px * 2 - 1; x <= px * 2 + 2; x++) {
+          if (!level.has(key(x, y))) continue;
+          const left = (x - px * 2) * TS + MARGIN, top = (y - py * 2) * TS + MARGIN;
+          const cut = { left: Math.max(0, -left), top: Math.max(0, -top) };
+          const width = Math.min(TS - cut.left, TS * 2 + 2 * MARGIN - Math.max(0, left)), height = Math.min(TS - cut.top, TS * 2 + 2 * MARGIN - Math.max(0, top));
+          if (width <= 0 || height <= 0) continue;
+          const input = await sharp(await readTile(layer, z + 1, x, y)).extract({ ...cut, width, height }).toBuffer();
+          composite.push({ input, left: Math.max(0, left), top: Math.max(0, top) });
+        }
+        const S = TS * 2 + 2 * MARGIN;
+        const merged = await sharp({ create: { width: S, height: S, channels: 3, background: { r: BG[0], g: BG[1], b: BG[2] } } })
+          .composite(composite).png().toBuffer();
+        const half = await sharp(merged).resize(S / 2, S / 2, { kernel: "lanczos3" }).png().toBuffer();
+        await save(sharp(half).extract({ left: MARGIN / 2, top: MARGIN / 2, width: TS, height: TS }), z, px, py);
+      });
+    }
+    await pool(jobs);
+    level = next;
+    changed = nextChanged;
+    index[layer][z] = keep(z);
+  }
+  console.log(`  ${layer} z${MIN_Z}–${NATIVE_Z - 1}: ${Object.keys(hashes).length - Object.keys(index[layer][NATIVE_Z]).length} tiles`);
+  st.sources = nextSources;
+  st.hashes = hashes; // tiles no longer produced drop out (they stay in R2, unreferenced)
+}
+
+/** Surface ellipsoid height sampler from the renderer's height pass (256² per 1024² tile). */
+class Heights {
+  private cache = new Map<string, Float32Array | null>();
+  constructor(private dirs: string[]) {}
+  async ensure(x: number, y: number, r = 32) {
+    for (let ty = Math.floor((y - r) / CAMERA.tile); ty <= Math.floor((y + r) / CAMERA.tile); ty++)
+      for (let tx = Math.floor((x - r) / CAMERA.tile); tx <= Math.floor((x + r) / CAMERA.tile); tx++) {
+        const k = `${tx}_${ty}`;
+        if (this.cache.has(k)) continue;
+        const file = this.dirs.map((d) => join(d, `${k}.png`)).find(existsSync);
+        this.cache.set(k, file ? await readHeights(file) : null);
+      }
+  }
+  /** Surface height at an art pixel (call ensure() first). */
+  at(x: number, y: number): number | null {
+    const T = CAMERA.tile, k = T / 256;
+    const tx = Math.floor(x / T), ty = Math.floor(y / T);
+    const h = this.cache.get(`${tx}_${ty}`);
+    if (!h) return null;
+    const v = h[Math.floor((y - ty * T) / k) * 256 + Math.floor((x - tx * T) / k)];
+    return Number.isNaN(v) ? null : v;
+  }
+  /** Lowest surface (≈ ground, not rooftops) within ~r art px of a pixel. */
+  async ground(x: number, y: number, r = 24): Promise<number | null> {
+    await this.ensure(x, y, r);
+    let best: number | null = null;
+    for (let dy = -r; dy <= r; dy += 4)
+      for (let dx = -r; dx <= r; dx += 4) {
+        const h = this.at(x + dx, y + dy);
+        if (h !== null && (best === null || h < best)) best = h;
+      }
+    return best;
+  }
+}
+
+/** lat/lon -> art pixel on the real terrain (iterate: project, read ground, re-project). */
+async function onGround(heights: Heights, lat: number, lon: number) {
+  let h = groundH();
+  let [x, y] = llhToPixel(lat, lon, h);
+  for (let it = 0; it < 3; it++) {
+    const g = await heights.ground(x, y);
+    if (g === null) break;
+    h = g;
+    [x, y] = llhToPixel(lat, lon, h);
+  }
+  return { x, y, h };
+}
+
+async function exportBorders(heights: Heights) {
+  const raw = readJson(join(RAW, "boundaries", `${activeRegion()}.json`));
+  const feats = [];
+  for (const el of raw.elements) {
+    const ways: Array<Array<[number, number]>> = el.members
+      .filter((m: any) => m.type === "way" && m.role === "outer" && m.geometry)
+      .map((m: any) => m.geometry.map((p: any) => [p.lat, p.lon]));
+    const out = [];
+    for (const ring of stitch(ways)) {
+      const pts: Array<[number, number]> = [];
+      for (const [lat, lon] of ring) {
+        const { x, y } = await onGround(heights, lat, lon);
+        pts.push([Math.round(y * 10) / 10, Math.round(x * 10) / 10]);
+      }
+      out.push(pts);
+    }
+    feats.push({ id: el.id, name: el.tags.name, name_en: el.tags["name:en"], rings: out, label: labelPoint(out) });
+  }
+  writeData("borders", JSON.stringify(feats));
+  console.log(`  borders: ${feats.length} cities`);
+}
+
+/** Drivable roads as ENU polylines sampled every 2 m, each sample flagged visible/occluded. */
+async function exportRoads(areas: string[], heights: Heights) {
+  const CLS: Record<string, number> = { motorway: 0, trunk: 0, primary: 1, secondary: 2, tertiary: 3, unclassified: 4, residential: 4, living_street: 5, service: 5 };
+  const ways = [];
+  const seen = new Set<number>(); // areas overlap (the pilot lies inside tlv-core): each OSM way once
+  let occluded = 0, total = 0;
+  for (const a of areas) {
+    const f = join(RAW, a, "roads.json");
+    if (!existsSync(f)) continue;
+    const groundDir = join(DERIVED, a, "ground");
+    const meta = readJson<TerrainMeta>(join(groundDir, "meta.json"));
+    const bytes = readFileSync(join(groundDir, "height.bin"));
+    const terrain = new Float32Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
+    if (terrain.length !== meta.nx * meta.ny) throw new Error(`invalid terrain grid: ${a}`);
+    const features = readJson<Array<{ id?:number; bridge?:boolean; l?: Point[]; k: string; r?: Point[][] }>>(join(groundDir, "features.json"));
+    const profiles = new Map(features.filter(f=>f.bridge && f.l).map(f=>[f.id, f.l!]));
+    const water = features.filter(f => ["water", "sea", "pool"].includes(f.k) && f.r).map(f => f.r!);
+    const waterAt = (x: number, y: number) => inWater(x, y, water);
+    const els = readJson(f).elements.filter((el: any) => {
+      const t = el.tags ?? {};
+      if (seen.has(el.id)) return false;
+      seen.add(el.id);
+      return el.geometry?.length >= 2 && (!t.tunnel || t.tunnel === "no") && (!t.covered || t.covered === "no") && !String(t.layer ?? "").startsWith("-") && roadWidth(t) > 0;
+    });
+    // split ways at every node another road shares, so junctions are always way ends
+    const use = new Map<number, number>();
+    for (const el of els) el.nodes.forEach((n: number, i: number) => use.set(n, (use.get(n) ?? 0) + (i === 0 || i === el.nodes.length - 1 ? 2 : 1)));
+    for (const el of els) {
+      const t = el.tags ?? {};
+      const cls = CLS[String(t.highway).replace("_link", "")] ?? 5;
+      const width = roadWidth(t);
+      const isBridge = !!t.bridge && t.bridge !== "no";
+      const bridgeLine = profiles.get(el.id);
+      const deck = isBridge && bridgeLine ? bridgeProfile(bridgeLine,(x,y)=>groundAt(meta,terrain,x,y),waterAt) : null;
+      let start = 0;
+      for (let end = 1; end < el.nodes.length; end++) {
+        if (end < el.nodes.length - 1 && (use.get(el.nodes[end]) ?? 0) < 2) continue;
+        const pts = el.geometry.slice(start, end + 1).map((p: any) => ({ lat: p.lat, lon: p.lon, e: ecefToEnu(llhToEcef(p.lat, p.lon, 0)) }));
+        const samples: number[] = [], waterSamples: boolean[] = [];
+        for (let i = 0; i < pts.length - 1; i++) {
+          const a0 = pts[i], b0 = pts[i + 1];
+          const n = Math.max(1, Math.ceil(Math.hypot(b0.e[0] - a0.e[0], b0.e[1] - a0.e[1]) / 2));
+          for (let k = 0; k < n + (i === pts.length - 2 ? 1 : 0); k++) {
+            const f2 = k / n, lat = a0.lat + (b0.lat - a0.lat) * f2, lon = a0.lon + (b0.lon - a0.lon) * f2;
+            const e = ecefToEnu(llhToEcef(lat, lon, 0));
+            const up = isBridge ? (deck ? deckHeight(deck,e[0],e[1]) : null)
+              : Number(t.layer)>0 ? null : groundAt(meta, terrain, e[0], e[1]);
+            total++;
+            samples.push(Math.round(e[0]*10)/10, Math.round(e[1]*10)/10, up === null ? 0 : Math.round(up*10)/10, up === null ? 0 : 1);
+            waterSamples.push(waterAt(e[0], e[1]));
+          }
+        }
+        ways.push({
+          bridge: !!t.bridge && t.bridge !== "no", water: waterSamples, waterAt,
+          y: Number(t.layer) || (t.bridge && t.bridge !== "no" ? 1 : 0),
+          c: cls, o: t.oneway === "-1" ? -1 : isOneway(t) ? 1 : 0,
+          l: roadLanes(t), w: Math.round(width * 10) / 10, a: el.nodes[start], b: el.nodes[end], s: samples,
+        });
+        start = end;
+      }
+    }
+  }
+  // Resolve altitude before testing screen-space occlusion. A missing height pass is unsafe.
+  hideBelowBanks(ways);
+  hideUnderBridges(ways);
+  for (const w of ways) for (let k = 0; k < w.s.length; k += 4) {
+    if (!w.s[k+3]) continue;
+    const a=Math.max(0,k-4), b=Math.min(w.s.length-4,k+4);
+    const dx=w.s[b]-w.s[a], dy=w.s[b+1]-w.s[a+1], length=Math.hypot(dx,dy);
+    if (!length) { w.s[k+3]=0; continue; }
+    // Whole carriageway, not only its centre: lane offsets must not escape onto water/roofs.
+    const steps=Math.max(1,Math.ceil(w.w));
+    for(let j=0;j<=steps;j++) {
+      const off=w.w*(j/steps-0.5);
+      const p: [number,number,number]=[w.s[k]+dy/length*off,w.s[k+1]-dx/length*off,w.s[k+2]];
+      if (!w.bridge && w.waterAt(p[0],p[1])) { w.s[k+3]=0; break; }
+      // A roof/overhang can cover the bus silhouette even when the road centre is clear.
+      for (const lift of [0, 1.6, 3.2]) {
+        const q: [number,number,number] = [p[0],p[1],p[2]+lift];
+        const [x,y]=enuToPixel(q);
+        await heights.ensure(x,y);
+        if (!roadSurfaceSafe(heights.at(x,y),enuHeight(q),lift===0)
+          || !paintedArt.has(key(Math.floor(x/CAMERA.tile),Math.floor(y/CAMERA.tile)))
+          || edgeDistance(x,y)<(EDGE0+EDGE1)/2) { w.s[k+3]=0; break; }
+      }
+      if (!w.s[k+3]) break;
+    }
+  }
+  occluded = ways.reduce((n,w)=>n+w.s.filter((v,i)=>i%4===3 && !v).length,0);
+  writeData("roads", JSON.stringify(encodeRoads(ways)));
+  console.log(`  roads: ${ways.length} ways, ${total} samples, ${((occluded / Math.max(1, total)) * 100).toFixed(1)}% occluded`);
+}
+
+/**
+ * Roads for the viewer, columnar and delta-coded (~2.6× smaller than one object per way after
+ * compression; decoded by web/src/scripts/roads.ts back into { c, o, l, w, a, b, s } per way):
+ *   c, o, l, w   per way: class, oneway, lanes, width (m)
+ *   a, b         per way: junction ids (OSM node ids renumbered 0…, only their identity matters)
+ *   n            per way: number of samples
+ *   s            per sample e, n, u in 0.1 m: a way's first sample absolute, then differences
+ *   v            per way: number of runs, then run lengths of visible / hidden samples, visible first
+ */
+function encodeRoads(ways: Array<{ c: number; o: number; l: number; w: number; a: number; b: number; s: number[] }>) {
+  const ids = new Map<number, number>(), id = (n: number) => ids.get(n) ?? ids.set(n, ids.size).get(n)!;
+  const out = { v: 2, c: [] as number[], o: [] as number[], l: [] as number[], w: [] as number[], a: [] as number[], b: [] as number[], n: [] as number[], s: [] as number[], vis: [] as number[] };
+  for (const w of ways) {
+    out.c.push(w.c); out.o.push(w.o); out.l.push(w.l); out.w.push(w.w); out.a.push(id(w.a)); out.b.push(id(w.b));
+    out.n.push(w.s.length / 4);
+    let pe = 0, pn = 0, pu = 0, cur = 1, run = 0;
+    const runs: number[] = [];
+    for (let k = 0; k < w.s.length; k += 4) {
+      const e = Math.round(w.s[k] * 10), n = Math.round(w.s[k + 1] * 10), u = Math.round(w.s[k + 2] * 10);
+      out.s.push(e - pe, n - pn, u - pu);
+      pe = e; pn = n; pu = u;
+      if (w.s[k + 3] === cur) run++; else { runs.push(run); cur = w.s[k + 3]; run = 1; }
+    }
+    runs.push(run);
+    out.vis.push(runs.length, ...runs);
+  }
+  return out;
+}
+
+/**
+ * Vehicles on a road passing under a bridge (a road on a higher layer) must disappear beneath its
+ * deck: mark those samples hidden. Returns how many samples were hidden.
+ */
+function hideUnderBridges(ways: Array<{ y: number; w: number; a: number; b: number; s: number[] }>) {
+  type Seg = [number, number, number, number, number, number, number, number]; // a, b, half width, layer, way ends
+  const CELL = 20, grid = new Map<string, Seg[]>();
+  for (const w of ways) {
+    if (w.y <= 0) continue;
+    for (let k = 0; k + 4 < w.s.length; k += 4) {
+      const seg: Seg = [w.s[k], w.s[k + 1], w.s[k + 4], w.s[k + 5], w.w / 2 + 1.5, w.y, w.a, w.b];
+      for (let gx = Math.floor(Math.min(seg[0], seg[2]) / CELL) - 1; gx <= Math.floor(Math.max(seg[0], seg[2]) / CELL) + 1; gx++)
+        for (let gy = Math.floor(Math.min(seg[1], seg[3]) / CELL) - 1; gy <= Math.floor(Math.max(seg[1], seg[3]) / CELL) + 1; gy++)
+          grid.set(`${gx},${gy}`, [...(grid.get(`${gx},${gy}`) ?? []), seg]);
+    }
+  }
+  let hidden = 0;
+  for (const w of ways)
+    for (let k = 0; k < w.s.length; k += 4) {
+      const x = w.s[k], y = w.s[k + 1];
+      if (!w.s[k + 3]) continue;
+      for (const [ax, ay, bx, by, r, layer, ea, eb] of grid.get(`${Math.floor(x / CELL)},${Math.floor(y / CELL)}`) ?? []) {
+        if (layer <= w.y || [ea, eb].includes(w.a) || [ea, eb].includes(w.b)) continue; // not the bridge's own approach
+        const dx = bx - ax, dy = by - ay, t = Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / (dx * dx + dy * dy || 1)));
+        if (Math.hypot(x - ax - t * dx, y - ay - t * dy) < r) { w.s[k + 3] = 0; hidden++; break; }
+      }
+    }
+  return hidden;
+}
+
+/** Interior point farthest from the boundary (coarse pole of inaccessibility), as [y, x]. */
+function labelPoint(rings: Array<Array<[number, number]>>): [number, number] {
+  const ring = rings.reduce((a, b) => (b.length > a.length ? b : a));
+  const ys = ring.map((p) => p[0]), xs = ring.map((p) => p[1]);
+  const [y0, y1, x0, x1] = [Math.min(...ys), Math.max(...ys), Math.min(...xs), Math.max(...xs)];
+  const inside = (x: number, y: number) => {
+    let c = false;
+    for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+      const [yi, xi] = ring[i], [yj, xj] = ring[j];
+      if (yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) c = !c;
+    }
+    return c;
+  };
+  const distEdge = (x: number, y: number) => {
+    let d = Infinity;
+    for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+      const [ay, ax] = ring[j], [by, bx] = ring[i];
+      const L2 = (bx - ax) ** 2 + (by - ay) ** 2 || 1;
+      const t = Math.max(0, Math.min(1, ((x - ax) * (bx - ax) + (y - ay) * (by - ay)) / L2));
+      d = Math.min(d, Math.hypot(x - ax - t * (bx - ax), y - ay - t * (by - ay)));
+    }
+    return d;
+  };
+  let best: [number, number] = [ys[0], xs[0]], bestD = -1;
+  const N = 40;
+  for (let i = 0; i <= N; i++) for (let j = 0; j <= N; j++) {
+    const x = x0 + ((x1 - x0) * i) / N, y = y0 + ((y1 - y0) * j) / N;
+    if (!inside(x, y)) continue;
+    const d = distEdge(x, y);
+    if (d > bestD) { bestD = d; best = [Math.round(y), Math.round(x)]; }
+  }
+  return best;
+}
+
+function stitch(ways: Array<Array<[number, number]>>) {
+  const eq = (a: [number, number], b: [number, number]) => a[0] === b[0] && a[1] === b[1];
+  const left = ways.map((w) => [...w]);
+  const rings: Array<Array<[number, number]>> = [];
+  while (left.length) {
+    const ring = left.shift()!;
+    let grown = true;
+    while (!eq(ring[0], ring[ring.length - 1]) && grown) {
+      grown = false;
+      for (let i = 0; i < left.length; i++) {
+        const w = left[i], end = ring[ring.length - 1];
+        if (eq(w[0], end)) ring.push(...w.slice(1));
+        else if (eq(w[w.length - 1], end)) ring.push(...w.reverse().slice(1));
+        else continue;
+        left.splice(i, 1);
+        grown = true;
+        break;
+      }
+    }
+    rings.push(ring);
+  }
+  return rings;
+}
+
+/**
+ * Each city's opening view as one small image (and a ~0.5 KB blurred version inlined in the page), so
+ * the first frame shows the map at once and the tiles fade in over it. The viewer opens a city
+ * centred on `center` with `widthM` across the screen; the image covers that width and a fixed
+ * height: H = 0.8 W for landscape screens (aspect ≥ 5:4), 2.2 W for portrait. The page lays it out with CSS
+ * only (full width, centred vertically), so it lines up with the map before any script runs.
+ */
+const PREVIEWS = { land: { aspect: 0.8, width: 768 }, port: { aspect: 2.2, width: 480 } };
+async function exportPreviews() {
+  const out: Record<string, Record<string, { file: string; lqip: string }>> = {};
+  for (const [slug, city] of Object.entries(CITIES)) {
+    if (city.region !== activeRegion()) continue;
+    const [cx, cy] = llhToPixel(city.center[0], city.center[1], 25); // as the viewer's show()
+    const W = city.widthM / CAMERA.mpp;
+    out[slug] = {};
+    for (const [kind, { aspect, width }] of Object.entries(PREVIEWS)) {
+      const H = W * aspect, height = Math.round(width * aspect);
+      // the finest zoom that still has at least `width` pixels across the view
+      const z = Math.min(NATIVE_Z, NATIVE_Z - Math.floor(Math.log2(W / width)));
+      const f = 2 ** (z - NATIVE_Z), span = TS / f;
+      const x0 = cx - W / 2, y0 = cy - H / 2;
+      const composite = [];
+      for (let ty = Math.floor(y0 / span); ty <= Math.floor((y0 + H) / span); ty++)
+        for (let tx = Math.floor(x0 / span); tx <= Math.floor((x0 + W) / span); tx++) {
+          if (!index.map?.[z]?.[key(tx, ty)] && !state.layers.map?.hashes[`${z}/${tx}_${ty}`]) continue;
+          composite.push({ input: await readTile("map", z, tx, ty), left: Math.round((tx * span - x0) * f), top: Math.round((ty * span - y0) * f) });
+        }
+      const cw = Math.round(W * f), ch = Math.round(H * f);
+      const inside = composite.filter((c) => c.left < cw && c.top < ch && c.left > -TS && c.top > -TS);
+      // sharp composites need inputs inside the canvas: pad by a tile on every side, then crop
+      const canvas = await sharp({ create: { width: cw + 2 * TS, height: ch + 2 * TS, channels: 3, background: { r: BG[0], g: BG[1], b: BG[2] } } })
+        .composite(inside.map((c) => ({ ...c, left: c.left + TS, top: c.top + TS }))).png().toBuffer();
+      const view = await sharp(canvas).extract({ left: TS, top: TS, width: cw, height: ch }).resize(width, height, { kernel: "lanczos3" }).png().toBuffer();
+      const img = await sharp(view).avif({ quality: 45, effort: 6 }).toBuffer();
+      const name = `preview/${slug}-${kind}`, h = hash(img), file = `${name}.${h}.${FORMAT}`;
+      if (state.data[name] !== h) {
+        mkdirSync(join(OUT, "preview"), { recursive: true });
+        writeFileSync(join(OUT, file), img);
+        state.data[name] = h;
+      }
+      const tiny = await sharp(view).resize(24, Math.round(24 * aspect)).webp({ quality: 40 }).toBuffer();
+      out[slug][kind] = { file, lqip: `data:image/webp;base64,${tiny.toString("base64")}` };
+      console.log(`  preview ${slug} ${kind}: ${width}×${height} from z${z}, ${(img.length / 1024).toFixed(0)} KB`);
+    }
+  }
+  return out;
+}
+
+let OUT = ""; // data/web/regions/<region>
+
+async function main() {
+  const { values: args, positionals: names } = parseArgs({ allowPositionals: true, options: {
+    "data-only": { type: "boolean" },
+    "art-bounds": { type: "string" },
+    "check-coverage": { type: "boolean" },
+    "require-painted": { type: "boolean" },
+  } });
+  const requestedBounds = args["art-bounds"] ? parseArtBounds(args["art-bounds"]) : null;
+  const areas = names.length ? names : ["roma-core"];
+  const regions = new Set(areas.map((a) => openArea(a).region));
+  if (regions.size !== 1) throw new Error(`export one region at a time (got ${[...regions].join(", ")})`);
+  OUT = join(WEB_CACHE, "regions", activeRegion());
+  const from = [pendingFile(), publishedFile()].find(existsSync);
+  if (from) state = readJson(from);
+  console.log(`  ${activeRegion()}: ${from ? `changes since ${from === pendingFile() ? "the last (unpublished) export" : "the published state"}` : "no published state: building everything"}`);
+  outlines = areas.map((a) => areaPolygon(AREAS[a].bbox));
+  outlineEdges = unionEdges(outlines);
+  // fade outline changes (areas added/adjoined) must re-export edge tiles: short hash of the union border
+  outlineKey = [...outlineEdges.map(([a, b]) => [...a, ...b].map(Math.round).join(",")).join(";")].reduce((h, c) => (h * 33 + c.charCodeAt(0)) >>> 0, 5381).toString(36);
+  [EDGE0, EDGE1] = REGIONS[activeRegion()].edgeFadePx ?? [EDGE0, EDGE1];
+  const photo = new Map<Key, string>(), art = new Map<Key, string>();
+  const attributions = new Set<string>();
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const a of areas) {
+    const dir = join(DERIVED, a);
+    const m = readJson(join(dir, "manifest.json"));
+    (m.attributions as string[]).flatMap((s) => s.split(";")).map((s) => s.trim()).filter(Boolean).forEach((s) => attributions.add(s));
+    for (const [layer, map] of [["render", photo], ["paint", art]] as const) {
+      if (!existsSync(join(dir, layer))) continue;
+      for (const f of readdirSync(join(dir, layer)).filter((f) => f.endsWith(".png"))) {
+        const [tx, ty] = parse(f.replace(".png", ""));
+        map.set(key(tx, ty), join(dir, layer, f));
+        if (layer === "render") renderAll.set(key(tx, ty), [...(renderAll.get(key(tx, ty)) ?? []), join(dir, layer, f)]);
+        x0 = Math.min(x0, tx * CAMERA.tile); y0 = Math.min(y0, ty * CAMERA.tile);
+        x1 = Math.max(x1, (tx + 1) * CAMERA.tile); y1 = Math.max(y1, (ty + 1) * CAMERA.tile);
+      }
+    }
+  }
+  const playable = requestedBounds ?? paintedBounds(art.keys(), CAMERA.tile);
+  if (!playable) throw new Error("no painted tiles: playable area cannot be exported");
+  const coverage = (requestedBounds ? artCoverage : renderedCoverage)(playable, new Set(art.keys()), new Set(photo.keys()), CAMERA.tile);
+  console.log(`  paint coverage: ${JSON.stringify(coverage)}`);
+  if (args["require-painted"] && (coverage.missingPaint.length || coverage.missingRender.length))
+    throw new Error("incomplete playable coverage: finish render/paint/assemble before the final export");
+  if (args["check-coverage"]) return; // read-only preflight, no roads/tiles/world/state writes
+  const heights = new Heights(areas.map((a) => join(DERIVED, a, "height")));
+  paintedArt = new Set(art.keys());
+  await exportRoads(areas, heights);
+  if (!args["data-only"]) {
+    paintedArt = new Set(art.keys());
+    await exportLayer("map", new Map([...photo, ...art])); // painted wins; unpainted fogged
+    await exportLayer("photo", photo);
+    for (const layer of Object.keys(index)) writeData(`tiles-${layer}`, JSON.stringify(index[layer]));
+  }
+  await exportBorders(heights);
+  const previews = await exportPreviews();
+  // OpenSeadragon wants non-negative tile indices at every level: origin aligned to a min-zoom tile
+  const block = TS * 2 ** (NATIVE_Z - MIN_Z);
+  const ox = Math.floor(x0 / block) * block, oy = Math.floor(y0 / block) * block;
+  const { right: r, up: u } = axes();
+  const m = CAMERA.mpp;
+  // Keep a release rectangle fixed while its gaps are painted; stray painted islands do not expand it.
+  const [px0, py0, px1, py1] = playable;
+  const projectLandmark = landmarkProjector(areas);
+  const world = JSON.stringify({
+    tile_size: TS, native_zoom: NATIVE_Z, min_zoom: MIN_Z, bounds: [[y0, x0], [y1, x1]],
+    playable: [[py0, px0], [py1, px1]],
+    activity: { version: 1, tileSize: CAMERA.tile, tiles: [...paintedArt].sort(), bounds: playable },
+    landmarks: Object.fromEntries((LANDMARKS[Object.keys(CITIES).find(c => CITIES[c].region === activeRegion()) ?? ""] ?? [])
+      .map(lm => [lm.name, projectLandmark(lm)])),
+    origin: [ox, oy], size: [Math.ceil((x1 - ox) / block) * block, Math.ceil((y1 - oy) / block) * block],
+    // ENU meters -> art pixels (linear; ENU origin = pixel origin)
+    enu2px: [[r[0] / m, r[1] / m, r[2] / m], [-u[0] / m, -u[1] / m, -u[2] / m]],
+    camera: camera(), title: REGIONS[activeRegion()].title, credits: REGIONS[activeRegion()].credits,
+    airport: REGIONS[activeRegion()].airport ?? null, areas: areas.map((a) => ({ id: a, title: AREAS[a]?.title })),
+    layers: { photo: photo.size, art: art.size }, attributions: [...attributions],
+    format: FORMAT,
+    files: { "tiles-map": dataFile("tiles-map"), "tiles-photo": dataFile("tiles-photo"), borders: dataFile("borders"), roads: dataFile("roads") },
+    previews,
+  }, null, 2);
+  if (state.data["world.json"] !== hash(world)) {
+    mkdirSync(join(OUT, "data"), { recursive: true });
+    writeFileSync(join(OUT, "data", "world.json"), world);
+    state.data["world.json"] = hash(world);
+  }
+  console.log(`  world.json: ${photo.size} rendered, ${art.size} painted tiles`);
+  mkdirSync(WEB_CACHE, { recursive: true });
+  writeFileSync(pendingFile(), JSON.stringify(state));
+  const files = existsSync(OUT) ? readdirSync(OUT, { recursive: true }).filter((f) => String(f).match(/\.(avif|webp|json)$/)).length : 0;
+  console.log(files ? `  ${files} files ready in ${OUT}\n  preview: npm run dev · publish: npm run publish -- ${activeRegion()}` : "  nothing changed");
+}
+
+
+main();

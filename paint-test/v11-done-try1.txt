@@ -1,0 +1,5 @@
+trento-vela-nord -33_-6 kept 0.738004750141508 0.6528551525026136
+trento-vela-nord -30_-8 restored 0.5877462491694035 0.6774840846352321
+trento-vela-nord -31_-7 kept 0.7688770801264279 0.6315439766965938
+trento-vela-nord -33_-6 visual-reject-pale-square
+trento-vela-nord -31_-7 visual-reject-clearing-square

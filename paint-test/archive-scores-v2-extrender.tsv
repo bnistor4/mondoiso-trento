@@ -1,0 +1,16 @@
+attempt	window	inputs	prompt	match	result
+01	0_-1	pilot window reused	-	0.432	pass
+02	-1_-2	input	T3 (strips: none)	0.519	pass
+03	1_-2	input	T3 (strips: none)	0.386	soft
+04	1_0	input	T3 (strips: none)	0.541	pass
+05	-1_0	input	T3 (strips: none)	0.518	pass
+06	0_-2	input	T3 (strips: none)	0.396	soft
+07	1_-1	input	T3 (strips: left+top+bottom)	0.549	pass
+08	0_0	input	T3 (strips: none)	0.4	soft
+09	-1_-1	input	T3 (strips: right+top+bottom)	0.575	pass
+10	-2_-3	input	T3 (strips: none)	0.535	pass
+11	0_-3	input	T3 (strips: bottom)	0.468	pass
+12	2_-3	input	T3 (strips: none)	0.457	pass
+13	2_-1	input	T3 (strips: left)	0.419	pass
+14	2_1	input	T3 (strips: none)	0.561	pass
+15	0_1	input	T3 (strips: top)	0.442	pass

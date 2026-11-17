@@ -1,0 +1,1 @@
+export AREA=trento-sardagna CTX=trento-citta,trento-nord,trento-sud,trento-est,trento-spini,trento-povo,trento-martignano,trento-gardolo,trento-ovest,trento-cortesano,trento-villamontagna,trento-calisio,trento-vela-sud,trento-vela-nord ORDER=paint-test/order-v8-sardagna.txt LOG=paint-test/scores-v8-sardagna.tsv LOF=paint-test/lo-v8-sardagna.txt TPL=scratch/t3u-est.txt
