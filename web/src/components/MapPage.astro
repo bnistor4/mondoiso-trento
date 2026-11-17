@@ -103,6 +103,7 @@ const pageUrl = new URL(Astro.url.pathname.replace(/(.)\/$/, "$1"), site).href, 
 				#preview .frame { aspect-ratio: 1 / 2.2; }
 				#preview .lqip { background-image: var(--lqip-port); }
 			}
+			#clouds { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 1; }
 			#overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 2; }
 			#credits { position: fixed; right: 0; bottom: 0; z-index: 10; font-size: 11px; line-height: 1.4; max-width: calc(100vw - 48px);
 				padding: 3px calc(8px + env(safe-area-inset-right, 0px)) calc(3px + env(safe-area-inset-bottom, 0px)) 8px;
