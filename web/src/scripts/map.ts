@@ -306,6 +306,8 @@ let playableRect: [[number, number], [number, number]] | null = null;
 
 viewer.addOnceHandler("open", () => {
   base().addOnceHandler("fully-loaded-change", () => { loadAnimations(); hidePreview(false); }); // first view's tiles are drawn
+  // sea of clouds over the faded border (clouds.ts): its own small chunk, after the first view is set up
+  if (!new URLSearchParams(location.search).has("noclouds")) setTimeout(() => import("./clouds.ts").then(({ startClouds }) => startClouds(viewer, REGION, [ox, oy])), 0);
   const [[by0, bx0], [by1, bx1]] = world.bounds;
   // Prefer painted AABB; otherwise a box around the city opening view (never the whole metro).
   if (world.playable) {
