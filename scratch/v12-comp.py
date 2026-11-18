@@ -5,7 +5,7 @@ import sys, os, shutil, numpy as np
 from PIL import Image
 from scipy.ndimage import gaussian_filter, binary_dilation
 a,w,g,mode=sys.argv[1:5]; dry='--dry' in sys.argv
-D=f'data/derived/{a}/windows/{w}.png'; arch=f'data/derived/archive-v12/windows/{a}/{w}.png'
+D=f'data/derived/{a}/windows/{w}.png'; arch=f'data/derived/{os.environ.get("ARCH","archive-v12")}/windows/{a}/{w}.png'
 os.makedirs(os.path.dirname(arch),exist_ok=True)
 if not os.path.exists(arch): shutil.copy2(D,arch)
 old=np.asarray(Image.open(arch).convert('RGB')).astype(np.float32)
