@@ -13,6 +13,7 @@ yy,xx=np.mgrid[0:A.shape[0],0:A.shape[1]]; X=x0-640+xx*4; Y=y0-640+yy*4
 dx=np.maximum(np.maximum(x0-X,X-x1),0); dy=np.maximum(np.maximum(y0-Y,Y-y1),0); dd=np.hypot(dx,dy)
 inside=(dd==0)&green; ring=(dd>=128)&(dd<=640)&green
 D=(A[ring].mean(0)-A[inside].mean(0))*K; print('blocktone',x0,y0,x1,y1,'delta Lab',D.round(1),'n',inside.sum(),ring.sum())
+if '--dry' in sys.argv: sys.exit()
 A16=open('/tmp/all16').read().strip().split(','); n=0
 for a in A16:
   for f in os.listdir(f'data/derived/{a}/windows'):

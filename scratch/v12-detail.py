@@ -1,4 +1,4 @@
-# usage: v12-detail.py <x0> <y0> <x1> <y1> <gain> [--fadeup=N] [--fade=320] [--preview=out.png] : v12b texfix-style detail gain on a box (global art px).
+# usage: v12-detail.py <x0> <y0> <x1> <y1> <gain> [--fadeup=N] [--fade=320] [--preview=out.png] [--all = every non-black px, not only forest] (env ARCH = archive dir, default archive-v12b) : v12b texfix-style detail gain on a box (global art px).
 # Field g(x,y) = 1 + (gain-1)*w, w = 1 in the box, raised-cosine fade over --fade px outside (--fadeup overrides the fade above the box),
 # times a soft forest mask (render green, dilate 4 + blur 12). Lab detail = image - gauss(image,6) is scaled by g in EVERY window file
 # covering the field (all 16 areas, overlaps stay consistent). Render-black kept. Originals -> data/derived/archive-v12b/windows/<area>/.
@@ -24,7 +24,7 @@ def field(X0,Y0,W,H):
   Xg=X0+np.arange(W); Yg=Y0+np.arange(H)
   ex=np.maximum(np.maximum(x0-Xg,Xg-x1),0)[None,:]; up=np.maximum(y0-Yg,0)[:,None]; dn=np.maximum(Yg-y1,0)[:,None]
   d=np.sqrt((ex/F)**2+(up/FU)**2+(dn/F)**2); w=np.where(d<1,0.5*(1+np.cos(np.pi*np.minimum(d,1))),0)
-  R=tilecrop('render',X0,Y0,W,H).astype(int); gr=binary_dilation((R[...,1]>R[...,0]+10)&(R[...,1]>R[...,2]+10),iterations=4)
+  R=tilecrop('render',X0,Y0,W,H).astype(int); gr=binary_dilation((R[...,1]>R[...,0]+10)&(R[...,1]>R[...,2]+10),iterations=4) if 'all' not in opt else (R.sum(2)>30)
   return 1+(G-1)*w*gaussian_filter(gr.astype(np.float32),12)
 def apply(Im,g):
   L=rgb2lab(Im); B=np.stack([gaussian_filter(L[...,c],6) for c in range(3)],-1); O=B+(L-B)*g[...,None]
@@ -41,7 +41,7 @@ for b in A16:
     if wx>x1+F or wx+1024<x0-F or wy>y1+F or wy+1024<y0-FU: continue
     g=field(wx,wy,1024,1024)
     if np.abs(g-1).max()<0.02: continue
-    p=f'{D}/{b}/windows/{f}'; ar=f'{D}/archive-v12b/windows/{b}/{f}'; os.makedirs(os.path.dirname(ar),exist_ok=True)
+    p=f'{D}/{b}/windows/{f}'; ar=f'{D}/{os.environ.get("ARCH","archive-v12b")}/windows/{b}/{f}'; os.makedirs(os.path.dirname(ar),exist_ok=True)
     if not os.path.exists(ar): shutil.copy2(p,ar)
     Image.fromarray(apply(np.asarray(Image.open(p).convert('RGB')),g)).save(p); n+=1; print('  ',b,f)
 print('detail gain',G,'windows changed',n)
