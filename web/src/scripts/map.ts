@@ -7,6 +7,7 @@ import { CAMERA, llhToPixel, useRegion } from "../../../pipeline/src/camera.ts";
 import { CITIES, REGIONS, regionGroundH } from "../../../pipeline/src/places.ts";
 import { LANDMARKS, landmarkPixel } from "../../../pipeline/src/landmarks.ts";
 import { ActivityMask, activeRoads, type ActivityCoverage } from "./activity.ts";
+import { initMapUi, syncToggleUi, type CreditLine } from "./map-ui.ts";
 declare const __TILES_ORIGIN__: string; // TILES_ORIGIN from .env, injected by astro.config.mjs
 
 interface World {
@@ -261,22 +262,44 @@ function frame(t: number) {
 requestAnimationFrame(frame);
 
 // ---- controls ----------------------------------------------------------------------------------
+const ZOOM_STEP = 1.35;
 let photo: OpenSeadragon.TiledImage | null = null, photoRequested = false;
+let photoOn = false;
+let goOpeningView: () => void = () => {};
+let uiSync: () => void = () => {};
+
+function toggleBorders() {
+  showBorders = !showBorders;
+  uiSync();
+}
+function toggleTraffic() {
+  showTraffic = !showTraffic;
+  uiSync();
+}
 function togglePhoto() {
   if (!photo) {
-    if (photoRequested) return; // still loading its index
+    if (photoRequested) return;
     photoRequested = true;
     layerIndex("photo").then((have) => viewer.addTiledImage({
       tileSource: tileSource("photo", have) as unknown as OpenSeadragon.TileSourceOptions,
-      success: (e) => { photo = (e as unknown as { item: OpenSeadragon.TiledImage }).item; },
+      success: (e) => {
+        photo = (e as unknown as { item: OpenSeadragon.TiledImage }).item;
+        photoOn = true;
+        uiSync();
+      },
     }));
-  } else photo.setOpacity(photo.getOpacity() > 0 ? 0 : 1);
+  } else {
+    const on = photo.getOpacity() > 0;
+    photo.setOpacity(on ? 0 : 1);
+    photoOn = !on;
+    uiSync();
+  }
 }
 
 window.addEventListener("keydown", (e) => {
   const key = e.key.toLowerCase();
-  if (key === "b") showBorders = !showBorders;
-  if (key === "t") showTraffic = !showTraffic;
+  if (key === "b") toggleBorders();
+  if (key === "t") toggleTraffic();
   if (key === "p") togglePhoto();
   if (key === "v") document.body.classList.toggle("video");
 });
@@ -351,6 +374,7 @@ viewer.addOnceHandler("open", () => {
   } else {
     show(city.center[0], city.center[1], Math.min(city.widthM, 2200));
   }
+  goOpeningView = () => show(city.center[0], city.center[1], Math.min(city.widthM, 2200));
 
   // Keep the centre inside the ready map while panning / zooming out
   const clampCenter = () => {
@@ -371,14 +395,40 @@ viewer.addOnceHandler("open", () => {
   });
 });
 
-document.getElementById("credits")!.innerHTML = [
-  `© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap contributors</a>`,
-  `<span title="© DLR e.V. 2010-2014 and © Airbus Defence and Space GmbH 2014-2018 provided under COPERNICUS by the European Union and ESA">Copernicus DEM</span>`,
+const creditLines: CreditLine[] = [
+  { html: `© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap contributors</a>` },
+  {
+    html: `Copernicus DEM`,
+    title: "© DLR e.V. 2010-2014 and © Airbus Defence and Space GmbH 2014-2018 provided under COPERNICUS by the European Union and ESA",
+  },
   ...(REGIONS[REGION]?.buildingHeights === "pat-lidar"
-    ? [`<span title="Building heights: LiDAR DSM/DTM, Provincia autonoma di Trento (CC BY 4.0)">LiDAR © <a href="https://siatservices.provincia.tn.it/geonetwork/srv/api/records/p_TN:79c6cdf0-c73a-46ba-870c-704bf4e27ac3">Provincia autonoma di Trento</a> (CC BY 4.0)</span>`]
+    ? [{
+        html: `LiDAR © <a href="https://siatservices.provincia.tn.it/geonetwork/srv/api/records/p_TN:79c6cdf0-c73a-46ba-870c-704bf4e27ac3">Provincia autonoma di Trento</a> (CC BY 4.0)`,
+        title: "Building heights: LiDAR DSM/DTM, Provincia autonoma di Trento (CC BY 4.0)",
+      }]
     : []),
-  `Painted with AI`,
-  `<a href="https://github.com/bnistor4/mondoiso-trento">Source</a>`,
-  `Made by <a href="https://bnistor.dev">Bogdan Nistor</a>, based on <a href="https://github.com/dg996/mondoisometrico">Mondo Isometrico</a>`,
-// each credit stays on one line; the separator rides at the end of the previous one so no line starts with "·"
-].map((c, i, all) => `<span class="credit">${c}${i < all.length - 1 ? " ·" : ""}</span>`).join(" ");
+  { html: "Painted with AI" },
+  { html: `<a href="https://github.com/bnistor4/mondoiso-trento">Source</a>` },
+  { html: `Release: <a href="https://github.com/bnistor4/mondoiso-trento/releases">GitHub releases</a>` },
+  {
+    html: `Made by <a href="https://bnistor.dev">Bogdan Nistor</a>, based on <a href="https://github.com/dg996/mondoisometrico">Mondo Isometrico</a>`,
+  },
+];
+const creditsFooter = document.getElementById("credits");
+if (creditsFooter && !creditsFooter.hidden) {
+  creditsFooter.innerHTML = creditLines.map((c) => c.html).join(" · ");
+}
+if (document.getElementById("map-chrome")) {
+  const ui = initMapUi({
+    zoomIn: () => viewer.viewport.zoomBy(ZOOM_STEP),
+    zoomOut: () => viewer.viewport.zoomBy(1 / ZOOM_STEP),
+    goHome: () => goOpeningView(),
+    togglePhoto,
+    toggleBorders,
+    toggleTraffic,
+    getPhotoOn: () => photoOn,
+    getBorders: () => showBorders,
+    getTraffic: () => showTraffic,
+  }, creditLines);
+  uiSync = ui.syncToggleUi;
+}
