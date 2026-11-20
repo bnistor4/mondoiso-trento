@@ -84,7 +84,33 @@ const pageUrl = new URL(Astro.url.pathname.replace(/(.)\/$/, "$1"), site).href, 
 			// a deep link (#@x,y,z, #metro, ?at=) opens somewhere else: no preview
 			if (/^#(@|metro)/.test(location.hash) || new URLSearchParams(location.search).has("at")) document.getElementById("preview")?.remove();
 		</script>
-		<footer id="credits"></footer>
+		<div id="map-chrome" class="map-chrome">
+			<div id="glass-toast" class="glass-toast" role="status" aria-live="polite" hidden></div>
+			<nav id="action-bar" class="glass-bar" aria-label="Controlli mappa">
+				<button type="button" id="ui-zoom-in" class="glass-btn" aria-label="Zoom avanti" data-tip="Zoom avanti"><svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M10 4v12M4 10h12" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"/></svg></button>
+				<button type="button" id="ui-zoom-out" class="glass-btn" aria-label="Zoom indietro" data-tip="Zoom indietro"><svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M4 10h12" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"/></svg></button>
+				<button type="button" id="ui-home" class="glass-btn glass-secondary" aria-label="Vista iniziale della città" data-tip="Vista iniziale"><svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M4 8.5 10 3.5l6 5v7.5H4V8.5Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M8 18v-5h4v5" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg></button>
+				<button type="button" id="ui-photo" class="glass-btn glass-btn-toggle" aria-label="Foto o dipinto" aria-pressed="false" data-tip="Foto o dipinto (P)"><svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M10 3 3.5 7 10 11l6.5-4L10 3Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M3.5 11 10 15l6.5-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M3.5 14.5 10 18.5l6.5-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+				<button type="button" id="ui-borders" class="glass-btn glass-btn-toggle glass-secondary" aria-label="Confini comunali" aria-pressed="false" data-tip="Confini (B)"><svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true"><rect x="4" y="5" width="12" height="10" rx="1" stroke="currentColor" stroke-width="1.5" stroke-dasharray="3 2"/></svg></button>
+				<button type="button" id="ui-traffic" class="glass-btn glass-btn-toggle glass-secondary" aria-label="Traffico" aria-pressed="true" data-tip="Traffico (T)"><svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true"><rect x="4" y="9" width="9" height="5" rx="1" stroke="currentColor" stroke-width="1.5"/><circle cx="6.5" cy="15" r="1.25" fill="currentColor"/><circle cx="10.5" cy="15" r="1.25" fill="currentColor"/><path d="M13 11h3l1.5 3H13" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg></button>
+				<button type="button" id="ui-share" class="glass-btn" aria-label="Copia link di questa vista" data-tip="Copia link"><svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M11 4.5 15.5 10 11 15.5V12H7v-4h4V4.5Z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M4.5 6.5v7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></button>
+				<button type="button" id="ui-fullscreen" class="glass-btn glass-secondary" aria-label="Schermo intero" data-tip="Schermo intero"><svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M4 8V4h4M12 4h4v4M16 12v4h-4M8 16H4v-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+				<button type="button" id="ui-info" class="glass-btn" aria-label="Crediti e informazioni" data-tip="Crediti"><svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true"><circle cx="10" cy="10" r="7" stroke="currentColor" stroke-width="1.5"/><path d="M10 9v5M10 6.5v.5" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"/></svg></button>
+				<button type="button" id="ui-more" class="glass-btn glass-compact-only" aria-label="Altre azioni" aria-expanded="false" aria-haspopup="menu" data-tip="Altro"><svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true"><circle cx="5" cy="10" r="1.25" fill="currentColor"/><circle cx="10" cy="10" r="1.25" fill="currentColor"/><circle cx="15" cy="10" r="1.25" fill="currentColor"/></svg></button>
+			</nav>
+			<div id="more-menu" class="glass-more" role="menu" hidden></div>
+			<p id="credits-pill" class="glass-credits-pill">
+				<span class="osm-label">© OpenStreetMap</span>
+				<button type="button" id="credits-info" class="glass-credits-info" aria-label="Apri crediti" aria-expanded="false" aria-controls="credits-popover">
+					<svg width="16" height="16" viewBox="0 0 20 20" fill="none" aria-hidden="true"><circle cx="10" cy="10" r="7" stroke="currentColor" stroke-width="1.5"/><path d="M10 9v5M10 6.5v.5" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"/></svg>
+				</button>
+			</p>
+			<div id="credits-popover" class="glass-popover" role="dialog" aria-labelledby="credits-popover-title" hidden>
+				<p id="credits-popover-title" class="glass-popover-title">Crediti</p>
+				<div id="credits-popover-body" class="glass-popover-body"></div>
+			</div>
+		</div>
+		<footer id="credits" hidden></footer>
 		<!-- video mode (?video or V): big credit line above the area social apps cover with their UI -->
 		<div id="video-credit">{region.credits.map((line, i) => <>{i > 0 && <br />}{line}</>)}</div>
 
@@ -105,23 +131,113 @@ const pageUrl = new URL(Astro.url.pathname.replace(/(.)\/$/, "$1"), site).href, 
 			}
 			#clouds { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 1; }
 			#overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 2; }
-			#credits { position: fixed; right: 0; bottom: 0; z-index: 10; font-size: 11px; line-height: 1.4; max-width: calc(100vw - 48px);
-				padding: 3px calc(8px + env(safe-area-inset-right, 0px)) calc(3px + env(safe-area-inset-bottom, 0px)) 8px;
-				background: rgba(255, 255, 255, 0.85); color: #333; border-top-left-radius: 6px; }
-			#credits .credit { white-space: nowrap; }
-			#credits a { color: #0b63c5; text-decoration: none; touch-action: manipulation; }
-			@media (pointer: coarse) { #credits { font-size: 12px; } #credits a { padding: 4px 0; } }
-			/* phones: a full-width bar with left-aligned lines, clear of the notch corners and the home indicator */
-			@media (max-width: 640px) {
-				#credits { left: 0; max-width: none; border-radius: 0; text-align: left;
-					padding: 5px calc(12px + env(safe-area-inset-right, 0px)) calc(5px + env(safe-area-inset-bottom, 0px)) calc(12px + env(safe-area-inset-left, 0px)); }
+			.map-chrome { position: fixed; inset: 0; z-index: 10; pointer-events: none; font-size: 13px; color: #1c1c1e; }
+			.glass-surface {
+				background: rgba(255, 255, 255, 0.72);
+				box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12), inset 0 0 0 1px rgba(255, 255, 255, 0.65);
 			}
+			@supports (backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px)) {
+				.glass-surface { backdrop-filter: blur(22px) saturate(1.65); -webkit-backdrop-filter: blur(22px) saturate(1.65); }
+			}
+			@media (prefers-reduced-transparency: reduce) {
+				.glass-surface { background: rgba(255, 255, 255, 0.94); backdrop-filter: none; -webkit-backdrop-filter: none; }
+			}
+			.glass-bar {
+				position: absolute; left: 50%; bottom: calc(12px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%);
+				display: flex; align-items: center; gap: 2px; max-width: min(96vw, 640px); padding: 4px 6px; border-radius: 999px;
+				pointer-events: auto; touch-action: manipulation; height: 44px;
+			}
+			.glass-bar { background: rgba(255, 255, 255, 0.72); box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12), inset 0 0 0 1px rgba(255, 255, 255, 0.65); }
+			@supports (backdrop-filter: blur(1px)) {
+				.glass-bar { backdrop-filter: blur(22px) saturate(1.65); -webkit-backdrop-filter: blur(22px) saturate(1.65); }
+			}
+			@media (prefers-reduced-transparency: reduce) { .glass-bar { background: rgba(255, 255, 255, 0.94); backdrop-filter: none; } }
+			.glass-btn {
+				display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; padding: 0;
+				border: none; border-radius: 999px; background: transparent; color: #1c1c1e; cursor: pointer;
+				position: relative; flex-shrink: 0;
+			}
+			.glass-btn:hover { background: rgba(0, 0, 0, 0.06); }
+			.glass-btn:focus-visible { outline: 2px solid #0a84ff; outline-offset: 2px; }
+			.glass-btn-toggle[aria-pressed="true"] { background: rgba(0, 0, 0, 0.1); color: #0a84ff; }
+			.glass-btn[data-tip]::after {
+				content: attr(data-tip); position: absolute; bottom: calc(100% + 8px); left: 50%; transform: translateX(-50%);
+				padding: 4px 8px; border-radius: 8px; font-size: 11px; white-space: nowrap; color: #fff; background: rgba(30, 30, 34, 0.92);
+				opacity: 0; pointer-events: none; transition: opacity 0.15s;
+			}
+			.glass-btn[data-tip]:hover::after, .glass-btn[data-tip]:focus-visible::after { opacity: 1; }
+			@media (prefers-reduced-motion: reduce) { .glass-btn[data-tip]::after { transition: none; } }
+			@media (pointer: coarse) {
+				.glass-btn { width: 44px; height: 44px; }
+				.glass-bar { height: 48px; padding: 2px 4px; }
+			}
+			.glass-compact-only { display: none; }
+			.glass-credits-pill {
+				position: absolute; right: calc(12px + env(safe-area-inset-right, 0px));
+				bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+				margin: 0; display: flex; align-items: center; gap: 6px; padding: 6px 8px 6px 12px; border-radius: 999px;
+				font-size: 11px; line-height: 1.2; pointer-events: auto; max-width: calc(50vw - 8px);
+				background: rgba(255, 255, 255, 0.72); box-shadow: 0 6px 24px rgba(0, 0, 0, 0.1), inset 0 0 0 1px rgba(255, 255, 255, 0.65);
+			}
+			@supports (backdrop-filter: blur(1px)) {
+				.glass-credits-pill { backdrop-filter: blur(20px) saturate(1.6); -webkit-backdrop-filter: blur(20px) saturate(1.6); }
+			}
+			@media (prefers-reduced-transparency: reduce) { .glass-credits-pill { background: rgba(255, 255, 255, 0.94); backdrop-filter: none; } }
+			.glass-credits-info {
+				display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; padding: 0;
+				border: none; border-radius: 999px; background: rgba(0, 0, 0, 0.05); color: #1c1c1e; cursor: pointer;
+			}
+			.glass-credits-info:hover { background: rgba(0, 0, 0, 0.1); }
+			.glass-popover {
+				position: absolute; right: calc(12px + env(safe-area-inset-right, 0px));
+				bottom: calc(56px + env(safe-area-inset-bottom, 0px));
+				width: min(320px, calc(100vw - 24px)); padding: 12px 14px; border-radius: 16px; pointer-events: auto;
+				background: rgba(255, 255, 255, 0.82); box-shadow: 0 12px 40px rgba(0, 0, 0, 0.15), inset 0 0 0 1px rgba(255, 255, 255, 0.7);
+			}
+			@supports (backdrop-filter: blur(1px)) {
+				.glass-popover { backdrop-filter: blur(24px) saturate(1.7); -webkit-backdrop-filter: blur(24px) saturate(1.7); }
+			}
+			@media (prefers-reduced-transparency: reduce) { .glass-popover { background: rgba(255, 255, 255, 0.96); backdrop-filter: none; } }
+			.glass-popover-title { margin: 0 0 8px; font-size: 13px; font-weight: 600; }
+			.glass-popover-body { font-size: 12px; line-height: 1.45; }
+			.glass-credit-line { margin: 0 0 6px; }
+			.glass-credit-line:last-child { margin-bottom: 0; }
+			.glass-popover a { color: #0b63c5; text-decoration: none; }
+			.glass-more {
+				position: absolute; left: 50%; bottom: calc(68px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%);
+				min-width: 200px; padding: 6px; border-radius: 14px; pointer-events: auto;
+				background: rgba(255, 255, 255, 0.9); box-shadow: 0 12px 32px rgba(0, 0, 0, 0.14), inset 0 0 0 1px rgba(255, 255, 255, 0.65);
+			}
+			@supports (backdrop-filter: blur(1px)) {
+				.glass-more { backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); }
+			}
+			.glass-more-item {
+				display: block; width: 100%; padding: 10px 12px; border: none; border-radius: 10px; background: transparent;
+				text-align: left; font: inherit; color: inherit; cursor: pointer;
+			}
+			.glass-more-item:hover, .glass-more-item[aria-pressed="true"] { background: rgba(0, 0, 0, 0.06); }
+			.glass-toast {
+				position: absolute; left: 50%; bottom: calc(68px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%);
+				padding: 8px 14px; border-radius: 999px; font-size: 13px; pointer-events: none;
+				background: rgba(30, 30, 34, 0.88); color: #fff;
+			}
+			@media (max-width: 640px) {
+				.glass-secondary { display: none; }
+				.glass-compact-only { display: inline-flex; }
+				.glass-credits-pill {
+					bottom: calc(62px + env(safe-area-inset-bottom, 0px));
+					right: calc(8px + env(safe-area-inset-right, 0px));
+					max-width: calc(100vw - 16px);
+				}
+				.glass-popover { bottom: calc(108px + env(safe-area-inset-bottom, 0px)); right: calc(8px + env(safe-area-inset-right, 0px)); }
+				.glass-bar { max-width: min(calc(100vw - 16px), 390px); }
+			}
+			body.video .map-chrome { display: none; }
 			#video-credit { display: none; position: fixed; z-index: 10; left: 50%; bottom: calc(9svh + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%);
 				width: max-content; max-width: 92vw; padding: 0.35em 0.8em; border-radius: 0.5em; text-align: center;
 				font-size: clamp(10px, 1.55vmin, 15px); font-weight: 500; line-height: 1.4; color: rgba(255, 255, 255, 0.95);
 				background: rgba(10, 12, 16, 0.42); backdrop-filter: blur(4px); text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5); pointer-events: none; }
 			body.video #video-credit { display: block; }
-			body.video #credits { display: none; }
 		</style>
 
 		<script>
