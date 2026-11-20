@@ -37,6 +37,8 @@ scene/render/paint/export locali, controllo completo, poi **un solo** publish R2
 seguito da **un solo** `npx vercel --prod` dalla root.
 
 `world.json` viene inviato per ultimo e solo dopo il controllo dei riferimenti su R2.
+Un re-publish salta le tile già presenti su R2 con stessa dimensione e hash (etag/MD5); `--force` ricarica tutto.
+La REST API R2 è limitata a 1200 richieste / 5 minuti per account: il publisher usa un pool concorrente con backoff su 429.
 Non modificare il manifest a mano. Nessun deploy a metà batch.
 I deploy automatici Git sono abilitati (`git.deploymentEnabled: true` in `vercel.json`):
 ogni push su un branch collegato crea un deployment Vercel. Le tile restano su R2 e

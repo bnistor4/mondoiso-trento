@@ -1,112 +1,120 @@
 /**
  * Publish a region's exported files to R2 and empty the local cache.
  *
- *   npm run publish -- roma-centro [--yes] [--keep]
+ *   npm run publish -- <region> [--yes] [--keep] [--force] [--dry-run]
  *
  * Uploads everything in data/web/regions/<region>/ (only what `npm run export` changed) to the
  * bucket in hosting.ts: tiles first, then previews and the content-hashed data files, world.json last
- * (it names the current files, so the live site never points at one that is not there yet). Each upload is checked (stored size = local size); then the export's state becomes
- * the published state (data/web-state/<region>.json) and the cache is deleted (--keep: leave it).
+ * (it names the current files, so the live site never points at one that is not there yet).
  *
- * Rate: the Cloudflare REST API allows ~4 uploads/s, so a full region (~9k files) takes ~40 min the
- * first time; later publishes only carry what changed.
+ * Rate: Cloudflare R2 REST API is limited to 1200 requests per 5 minutes per account
+ * (https://developers.cloudflare.com/r2/platform/limits/). This tool uses a token bucket near 4/s,
+ * a small worker pool, skip-if-unchanged via size + MD5/etag, and backs off on 429 using Retry-After.
  *
  * Auth: CLOUDFLARE_API_TOKEN (R2 write) if set, else the wrangler login (`npx wrangler login`).
+ * Optional higher throughput: set R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY for the S3-compatible API
+ * (not implemented here; would need AWS SigV4 or an SDK dependency).
  */
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { HOSTING } from "./hosting.ts";
 import { WEB_CACHE, WEB_STATE } from "./paths.ts";
 import { REGIONS } from "./places.ts";
-import { verifyWorldReferences, type WorldReferences } from "./publish-references.ts";
+import { runPublish } from "./publish-lib.ts";
 
 const args = process.argv.slice(2);
 const region = args.find((a) => !a.startsWith("--")) ?? "roma-centro";
 if (!REGIONS[region]) throw new Error(`unknown region ${region}`);
-const dir = join(WEB_CACHE, "regions", region), pending = join(WEB_CACHE, `${region}.state.json`);
-if (!existsSync(dir)) { console.log(`nothing to publish: ${dir} is empty (run npm run export first)`); process.exit(0); }
+const dir = join(WEB_CACHE, "regions", region);
+const pending = join(WEB_CACHE, `${region}.state.json`);
+const force = args.includes("--force");
+const dryRun = args.includes("--dry-run");
+if (!existsSync(dir)) {
+  console.log(`nothing to publish: ${dir} is empty (run npm run export first)`);
+  process.exit(0);
+}
 
 const rank = (f: string) => (f.startsWith("tiles/") ? 0 : f.endsWith("world.json") ? 2 : 1);
-const files = readdirSync(dir, { recursive: true }).map(String).filter((f) => /\.(avif|webp|json)$/.test(f))
+const files = readdirSync(dir, { recursive: true })
+  .map(String)
+  .filter((f) => /\.(avif|webp|json)$/.test(f))
   .sort((a, b) => rank(a) - rank(b));
 const bytes = files.reduce((s, f) => s + statSync(join(dir, f)).size, 0);
 const tiles = files.filter((f) => f.startsWith("tiles/")).length;
-console.log(`${region}: ${tiles} tiles + ${files.length - tiles} data files, ${(bytes / 1e6).toFixed(1)} MB → r2://${HOSTING.bucket}/regions/${region}/ (${HOSTING.origin})`);
-if (!args.includes("--yes")) {
+const mode = dryRun ? "dry-run" : "publish";
+console.log(
+  `${region} (${mode}): ${tiles} tiles + ${files.length - tiles} data files, ${(bytes / 1e6).toFixed(1)} MB → r2://${HOSTING.bucket}/regions/${region}/ (${HOSTING.origin})${force ? " · --force" : ""}`,
+);
+
+if (dryRun) {
+  console.log("  dry-run: no uploads, no cache or state changes");
+} else if (!args.includes("--yes")) {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   const ok = /^y(es)?$/i.test((await rl.question("publish? [y/N] ")).trim());
   rl.close();
   if (!ok) process.exit(1);
 }
 
+if (process.env.R2_ACCESS_KEY_ID && process.env.R2_SECRET_ACCESS_KEY) {
+  console.log(
+    "  note: R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY are set but this publish path uses the Cloudflare REST API only (S3 API would need extra signing code or a dependency)",
+  );
+}
+
 let token = process.env.CLOUDFLARE_API_TOKEN ?? "";
-const refresh = () => { // the wrangler OAuth token lasts ~1 h; wrangler refreshes it on demand
-  token = execFileSync("npx", ["-y", "wrangler@4", "auth", "token"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim().split("\n").at(-1)!;
+const refresh = () => {
+  token = execFileSync("npx", ["-y", "wrangler@4", "auth", "token"], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+  })
+    .trim()
+    .split("\n")
+    .at(-1)!;
 };
-if (!token) refresh();
+if (!dryRun && !token) refresh();
 
-// The Cloudflare API allows ~1200 requests / 5 min per user: pace uploads at ~3.8/s, back off on 429.
-const RATE = 3.8;
-let nextSlot = Date.now();
-const slot = async () => { const t = Math.max(Date.now(), nextSlot); nextSlot = t + 1000 / RATE; await new Promise((r) => setTimeout(r, t - Date.now())); };
+const logDir = join(WEB_CACHE, "..", "publish-logs");
+const eventLogPath = dryRun
+  ? undefined
+  : join(logDir, `publish-${region}-${new Date().toISOString().replace(/[:.]/g, "-")}.jsonl`);
 
-const TYPES: Record<string, string> = { avif: "image/avif", webp: "image/webp", json: "application/json" };
-const api = `https://api.cloudflare.com/client/v4/accounts/${HOSTING.accountId}/r2/buckets/${HOSTING.bucket}/objects/`;
-async function put(rel: string) {
-  const body = readFileSync(join(dir, rel)), key = `regions/${region}/${rel}`;
-  const headers = (): Record<string, string> => ({
-    Authorization: `Bearer ${token}`,
-    "Content-Type": TYPES[rel.split(".").pop()!],
-    // world.json is the one name that is reused; tiles carry ?v=<hash>, everything else has it in its name
-    "Cache-Control": rel.endsWith("world.json") ? HOSTING.cacheData : HOSTING.cacheTiles,
+try {
+  const counters = await runPublish({
+    region,
+    dir,
+    files,
+    yes: args.includes("--yes"),
+    keep: args.includes("--keep"),
+    force,
+    dryRun,
+    token: token || "dry-run",
+    refreshToken: refresh,
+    pendingStatePath: pending,
+    webStateDir: WEB_STATE,
+    eventLogPath,
   });
-  for (let attempt = 1; ; attempt++) {
-    try {
-      await slot();
-      const r = await fetch(api + key, { method: "PUT", headers: headers(), body });
-      if (r.status === 429) { nextSlot = Date.now() + 30_000; throw new Error("429 rate limited"); }
-      if (r.status === 401 || r.status === 403) { if (!process.env.CLOUDFLARE_API_TOKEN) refresh(); throw new Error(`auth ${r.status}`); }
-      const j = (await r.json()) as { success: boolean; result?: { size: string | number }; errors?: unknown[] };
-      if (!r.ok || !j.success) throw new Error(`${r.status} ${JSON.stringify(j.errors)}`);
-      if (Number(j.result!.size) !== body.length) throw new Error(`stored ${j.result!.size} bytes, local ${body.length}`);
-      return;
-    } catch (e) {
-      if (attempt >= 8) throw new Error(`${key}: ${(e as Error).message}`);
-      await new Promise((res) => setTimeout(res, 2000 * attempt));
-    }
+
+  if (dryRun) {
+    console.log(`  dry-run: would upload ${counters.uploaded}, would skip ${counters.skipped}`);
+    process.exit(0);
   }
-}
 
-// tiles and previews in parallel, then the data files in order (world.json last)
-const t0 = Date.now();
-let done = 0;
-const tileFiles = files.filter((f) => !f.startsWith("data/")), dataFiles = files.filter((f) => f.startsWith("data/")); // world.json sorts last
-const queue = [...tileFiles];
-await Promise.all(Array.from({ length: 8 }, async () => {
-  for (let f = queue.shift(); f; f = queue.shift()) {
-    await put(f);
-    if (++done % 200 === 0) process.stdout.write(`\r  ${done}/${files.length} · ${((Date.now() - t0) / 1000).toFixed(0)} s`);
+  const worldRel = files.find((f) => f.endsWith("world.json"));
+  const probe = worldRel ?? files.find((f) => f.startsWith("tiles/")) ?? files[0];
+  const r = await fetch(`${HOSTING.origin}/regions/${region}/${probe}?check=${Date.now()}`);
+  if (!r.ok) throw new Error(`${HOSTING.origin}/regions/${region}/${probe}: ${r.status} (uploaded, cache kept)`);
+  console.log(`  ${HOSTING.origin}/regions/${region}/${probe}: ${r.status}`);
+
+  mkdirSync(WEB_STATE, { recursive: true });
+  if (existsSync(pending)) renameSync(pending, join(WEB_STATE, `${region}.json`));
+  if (!args.includes("--keep")) {
+    rmSync(dir, { recursive: true, force: true });
+    console.log(`  cache emptied: ${dir}`);
   }
-}));
-// Upload data files except world.json first; world.json last and only if every named file is present.
-const worldRel = dataFiles.find((f) => f.endsWith("world.json"));
-const dataFirst = dataFiles.filter((f) => f !== worldRel);
-for (const f of dataFirst) { await put(f); done++; }
-if (worldRel) {
-  const world = JSON.parse(readFileSync(join(dir, worldRel), "utf8")) as WorldReferences;
-  await verifyWorldReferences(world, `${HOSTING.origin}/regions/${region}`);
-  await put(worldRel); done++;
+  if (eventLogPath) console.log(`  event log: ${eventLogPath}`);
+} catch (e) {
+  console.error((e as Error).message);
+  process.exit(1);
 }
-console.log(`\r  ${done}/${files.length} uploaded and checked in ${((Date.now() - t0) / 1000).toFixed(0)} s`);
-
-// spot check through the public domain (what the site loads)
-const probe = worldRel ?? tileFiles[0];
-const r = await fetch(`${HOSTING.origin}/regions/${region}/${probe}?check=${Date.now()}`);
-if (!r.ok) throw new Error(`${HOSTING.origin}/regions/${region}/${probe}: ${r.status} (uploaded, cache kept)`);
-console.log(`  ${HOSTING.origin}/regions/${region}/${probe}: ${r.status}`);
-
-mkdirSync(WEB_STATE, { recursive: true });
-if (existsSync(pending)) renameSync(pending, join(WEB_STATE, `${region}.json`));
-if (!args.includes("--keep")) { rmSync(dir, { recursive: true, force: true }); console.log(`  cache emptied: ${dir}`); }
